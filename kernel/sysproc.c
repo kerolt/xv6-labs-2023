@@ -75,6 +75,24 @@ int
 sys_pgaccess(void)
 {
   // lab pgtbl: your code here.
+  uint64 uvm_pgaddr;
+  int page_counts;
+  uint64 abits;
+  argaddr(0, &uvm_pgaddr);
+  argint(1, &page_counts);
+  argaddr(2, &abits);
+
+  int result = 0;
+  pagetable_t page_table = myproc()->pagetable;
+  for (int i = 0; i < page_counts; i++) {
+    pte_t *pte = walk(page_table, uvm_pgaddr, 0);
+    if (((*pte) & (PTE_A)) != 0) {
+      result |= (1 << i);
+      *pte &= (~PTE_A);
+    }
+    uvm_pgaddr += PGSIZE;
+  }
+  copyout(page_table, abits, (char*)&result, sizeof(result));
   return 0;
 }
 #endif

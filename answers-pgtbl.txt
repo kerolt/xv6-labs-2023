@@ -1,0 +1,2 @@
+Q: Which other xv6 system call(s) could be made faster using this shared page? Explain how.
+A: System calls using copyout can be accelerated to avoid consumption from user mode to kernel mode.

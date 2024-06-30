@@ -49,6 +49,14 @@ w_mepc(uint64 x)
 #define SSTATUS_UIE (1L << 0)  // User Interrupt Enable
 
 static inline uint64
+r_fp()
+{
+  uint64 x;
+  asm volatile("mv %0, s0" : "=r" (x) );
+  return x;
+}
+
+static inline uint64
 r_sstatus()
 {
   uint64 x;

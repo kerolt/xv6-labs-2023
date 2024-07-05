@@ -104,4 +104,10 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  int is_handling;                   // 用于判断当前进程是否正在执行处理函数
+  int tick_interval;                 // 定时器间隔，由系统sigalarm的第一个参数传入
+  int tick_counter;                  // 定时器计数器，每次tick进行+1
+  uint64 tick_handler;               // 间隔到了后执行的处理函数
+  struct trapframe *saved_trapframe; // 保存寄存器
 };

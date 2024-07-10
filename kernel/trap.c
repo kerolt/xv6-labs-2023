@@ -67,6 +67,19 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 13 || r_scause() == 15) {
+    uint64 fault_va = r_stval();
+    // 判断地址是否不合法
+    if (fault_va >= MAXVA ||
+        (fault_va < p->trapframe->sp &&
+         fault_va >= (p->trapframe->sp - PGSIZE)) ||
+        fault_va <= 0) {
+      p->killed = 1;
+    }
+    // 尝试进行cow操作
+    if (cow_alloc(p->pagetable, PGROUNDDOWN(fault_va)) < 0) {
+      p->killed = 1;
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

@@ -1,0 +1,2 @@
+Q: Why are there missing keys with 2 threads, but not with 1 thread?
+A: 因为没有在多线程访问共享资源时没有使用锁，造成该资源没有被互斥访问。在该例子中，多进程可能会对同一个table进行写操作，这样就会造成一个写操作覆盖了另一个写操作。

@@ -16,6 +16,9 @@
 #include "file.h"
 #include "fcntl.h"
 
+static struct inode*
+create(char *path, short type, short major, short minor);
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -169,6 +172,33 @@ bad:
   return -1;
 }
 
+uint64 sys_symlink(void) {
+  char target[MAXPATH], path[MAXPATH];
+  if (argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0) {
+    return -1;
+  }
+
+  begin_op();
+
+  // 软链接是一个特殊的文件，其存储的数据为目标文件的路径信息，因此我们在创建软链接时需要创建一个新的inode
+  struct inode *ip = create(path, T_SYMLINK, 0, 0);
+  if (ip == 0) {
+    end_op();
+    return -1;
+  }
+
+  // 将target字符串写入inode的第一个直接块中
+  if (writei(ip, 0, (uint64)target, 0, strlen(target)) < 0) {
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+
+  end_op();
+  return 0;
+}
+
 // Is the directory dp empty except for "." and ".." ?
 static int
 isdirempty(struct inode *dp)
@@ -316,13 +346,15 @@ sys_open(void)
 
   begin_op();
 
-  if(omode & O_CREATE){
+  if (omode & O_CREATE) {
+    // 创建文件
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
       end_op();
       return -1;
     }
   } else {
+    // 打开文件或者其他操作
     if((ip = namei(path)) == 0){
       end_op();
       return -1;
@@ -339,6 +371,38 @@ sys_open(void)
     iunlockput(ip);
     end_op();
     return -1;
+  }
+
+  // 文件的类型是软链接，且没有使用O_NOFOLLOW标志，就递归地查找，直到找到最终的目标文件的inode
+  // 否则，就当作是正常的文件进行打开
+  if (ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
+    for (int i = 0; i < 10; i++) {
+      // 从软链接文件的inode中读取目标文件的路径字符串
+      // 注意，在这一步之前已经对ip上锁，因此这里操作完后需要解锁
+      if (readi(ip, 0, (uint64)path, 0, strlen(path)) < 0) {
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      iunlockput(ip);
+
+      ip = namei(path);
+      if (ip == 0) {
+        end_op();
+        return -1;
+      }
+
+      ilock(ip);
+
+      if (ip->type != T_SYMLINK) {
+        break;
+      }
+    }
+    if (ip->type == T_SYMLINK) {
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
   }
 
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){

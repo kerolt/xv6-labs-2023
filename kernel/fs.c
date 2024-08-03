@@ -69,8 +69,13 @@ balloc(uint dev)
   struct buf *bp;
 
   bp = 0;
+  // 文件系统总共有 200000 个块（sb.size = 200000），且每个位图块可以管理 8192 个块（BPB = 8192）
+  // 在第一次迭代中，b = 0，读取管理第 0 到第 8191 个块的位图块。
+  // 内层循环遍历这 8192 个块，寻找空闲块。
+  // 在第二次迭代中，b = 8192，读取管理第 8192 到第 16383 个块的位图块。
   for(b = 0; b < sb.size; b += BPB){
-    bp = bread(dev, BBLOCK(b, sb));
+    bp = bread(dev, BBLOCK(b, sb)); // 获取在第n次迭代中管理一个BPB大小的位图块
+    // 遍历这个位图块中的每一位，找到未使用的块号并返回
     for(bi = 0; bi < BPB && b + bi < sb.size; bi++){
       m = 1 << (bi % 8);
       if((bp->data[bi/8] & m) == 0){  // Is block free?
@@ -385,6 +390,7 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
+  // 找前11个直接块
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0){
       addr = balloc(ip->dev);
@@ -396,6 +402,7 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
+  // 从一级间接块中找
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0){
@@ -414,6 +421,39 @@ bmap(struct inode *ip, uint bn)
       }
     }
     brelse(bp);
+    return addr;
+  }
+  bn -= NINDIRECT;
+
+  // 从二级间接块中找
+  if (bn < NINDIRECT * NINDIRECT) {
+    // inode的二级间接块还未分配
+    if ((addr = ip->addrs[NDIRECT + 1]) == 0) {
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT + 1] = addr;
+    }
+
+    int level1 = bn / NINDIRECT;
+    int level2 = bn % NINDIRECT;
+
+    bp = bread(ip->dev, addr);
+    a = (uint *)bp->data;
+    if ((addr = a[level1]) == 0){
+      a[level1] = addr = balloc(ip->dev);
+      log_write(bp); // 修改了就要记录日志
+    }
+    brelse(bp);
+
+    bp = bread(ip->dev, addr);
+    a = (uint *)bp->data;
+    if ((addr = a[level2]) == 0) {
+      a[level2] = addr = balloc(ip->dev);
+      log_write(bp); // 修改了就要记录日志
+    }
+    brelse(bp);
+
     return addr;
   }
 
@@ -446,6 +486,30 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  if (ip->addrs[NDIRECT + 1]) {
+    bp = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+    a = (uint *)bp->data;
+    // level1
+    for(j = 0; j < NINDIRECT; j++){
+      if (a[j]) {
+        // 这里必须用一个新的bp和a，否则会覆盖之前的
+        struct buf *bp1 = bread(ip->dev, a[j]);
+        uint *a1 = (uint *)bp1->data;
+        // level2
+        for (int k = 0; k < NINDIRECT; k++) {
+          if (a1[k]) {
+            bfree(ip->dev, a1[k]);
+          }
+        }
+        brelse(bp1);
+        bfree(ip->dev, a[j]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT + 1]);
+    ip->addrs[NDIRECT + 1] = 0;
   }
 
   ip->size = 0;

@@ -5,11 +5,17 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[], userret[];
+
+static int handle_mmap_fault(uint64 addr);
 
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
@@ -67,6 +73,12 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 13 || r_scause() == 15) {
+    if (handle_mmap_fault(r_stval()) != 0) {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      setkilled(p);
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
@@ -219,3 +231,63 @@ devintr()
   }
 }
 
+// 处理mmap的懒分配策略
+static int handle_mmap_fault(uint64 addr) {
+  struct proc *p = myproc();
+  struct vma *v = 0;
+
+  // 根据触发fault的地址，并据此找到对应的vma
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].used && addr >= p->vmas[i].start && addr < p->vmas[i].end) {
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if (!v) {
+    printf("no no no\n");
+    return -1;
+  }
+
+  // printf("ok\n");
+
+  // 校验
+  if (!v->file->readable && r_scause() == 13 && (v->flags & MAP_SHARED)) {
+    return -1;
+  }
+  if (!v->file->writable && r_scause() == 15 && (v->flags & MAP_SHARED)) {
+    return -1;
+  }
+
+  // 设置内存块权限
+  uint perm = PTE_V | PTE_U;
+  if (v->prot & PROT_READ) {
+    perm |= PTE_R;
+  }
+  if (v->prot & PROT_WRITE) {
+    perm |= PTE_W;
+  }
+  if (v->prot & PROT_EXEC) {
+    perm |= PTE_X;
+  }
+
+  // 分配物理块
+  char *pa = kalloc();
+  if (!pa) {
+    return -1;
+  }
+  memset(pa, 0, PGSIZE);
+
+  // 读取文件内容到内存块
+  uint offset = addr - v->start;
+  ilock(v->file->ip);
+  if (readi(v->file->ip, 0, (uint64)pa, offset, PGSIZE) == 0) {
+    iunlock(v->file->ip);
+    return -1;
+  }
+  iunlock(v->file->ip);
+
+  // 设置虚拟内存与物理内存的映射
+  mappages(p->pagetable, PGROUNDDOWN(addr), PGSIZE, (uint64)pa, perm);
+  
+  return 0;
+}

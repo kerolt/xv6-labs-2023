@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -503,3 +504,89 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// 获取一个可使用的vma的end地址
+static uint64 vma_end() {
+  struct proc *p = myproc();
+  struct vma *v = 0;
+  uint64 min_vma_end = TRAPFRAME;
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].used && p->vmas[i].end <= min_vma_end) {
+      min_vma_end = p->vmas[i].end;
+      v = &p->vmas[i];
+    }
+  }
+  if (!v) {
+    return min_vma_end;
+  }
+  return PGROUNDDOWN(v->start);
+}
+
+uint64 sys_mmap(void) {
+  // void *mmap(void *addr, int len, int prot, int flags, int fd, int offset);
+  uint64 addr;
+  int len, prot, flags, fd, offset;
+
+  struct proc *p = myproc();
+  struct file *f;
+  
+  argaddr(0, &addr);
+  argint(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argfd(4, &fd, &f);
+  argint(5, &offset);
+  if (addr < 0 || len < 0 || prot < 0 || flags < 0 || fd < 0 || offset < 0) {
+    return -1;
+  }
+
+  if (!f->readable && (prot & PROT_READ) && (flags & MAP_SHARED)) {
+    return -1;
+  }
+  if (!f->writable && (prot & PROT_WRITE) && (flags & MAP_SHARED)) {
+    return -1;
+  }
+
+  // 找到一个可用的vma
+  struct vma *v = 0;
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].used == 0) {
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if (!v) {
+    return -1;
+  }
+
+  // 初始化vma
+  uint64 end = vma_end();
+  v->len = len;
+  v->prot = prot;
+  v->file = f;
+  v->used = 1;
+  v->flags = flags;
+  v->offset = offset;
+  v->end = end;
+  v->start = end - len;
+
+  // 有文件映射时，对应的文件的引用计数也+1
+  filedup(f);
+
+  return v->start;
+}
+
+uint64 sys_munmap(void) {
+  // int munmap(void *addr, int len);
+  uint64 addr;
+  int len;
+
+  argaddr(0, &addr);
+  argint(1, &len);
+  if (addr < 0 || len < 0) {
+    return -1;
+  }
+
+  return munmap(addr, len);
+}
+

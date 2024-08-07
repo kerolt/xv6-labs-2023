@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "proc.h"
+#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -448,4 +453,76 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+// 将映射区域写回文件，并释放映射区域的内存
+static int mmap_writeback(pagetable_t pgtbl, uint64 src_va, int len, struct vma *vma) {
+  pte_t *pte;
+  uint64 addr;
+
+  // 遍历区域的页帧
+  for (addr = PGROUNDDOWN(src_va); addr < PGROUNDDOWN(src_va + len); addr += PGSIZE) {
+    // 获取页帧对应的pte
+    if ((pte = walk(pgtbl, addr, 0)) == 0) {
+      panic("mmap_writeback");
+    }
+    // 这是为了处理这样一种情况：使用了mmap系统调用却没有有访问映射的文件，由于懒分配的策略，
+    // 在写回文件时vma虽然有效，但是对应的pte并没有设置PTE_V，映射区域也还没有真正的映射文件
+    if (!(*pte & PTE_V)) {
+      continue;
+    }
+    // 映射区域被修改了，可以写回文件
+    if ((*pte & PTE_D) && (vma->flags & MAP_SHARED)) {
+      begin_op();
+      ilock(vma->file->ip);
+      uint offset = addr - src_va;
+      writei(vma->file->ip, 1, addr, offset, PGSIZE);
+      iunlock(vma->file->ip);
+      end_op();
+    }
+    kfree((void *)PTE2PA(*pte));
+    *pte = 0;
+  }
+
+  return 0;
+}
+
+// 解除区域 [addr, addr + len) 的文件映射
+uint64 munmap(uint64 addr, int len) {
+  struct proc *p = myproc();
+  struct vma *v = 0;
+
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].used && addr >= p->vmas[i].start && addr < p->vmas[i].end) {
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if (!v) {
+    return -1;
+  }
+
+  // 不在合法的位置
+  if (addr > v->start && addr + len < v->end) {
+    return -1;
+  }
+
+  // 将映射区域写回文件
+  mmap_writeback(p->pagetable, addr, len, v);
+
+  // 修改映射区域大小
+  if (addr == v->start) {
+    v->start += len;
+  } else if (addr == v->end - len) {
+    v->end = addr;
+  }
+  v->len -= len;
+
+  // 映射区域大小为0
+  if (v->len <= 0) {
+    fileclose(v->file);
+    v->used = 0;
+  }
+
+  return 0;
 }
